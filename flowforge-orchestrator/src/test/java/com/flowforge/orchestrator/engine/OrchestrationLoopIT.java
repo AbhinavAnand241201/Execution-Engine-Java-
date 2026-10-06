@@ -115,8 +115,11 @@ class OrchestrationLoopIT extends OrchestratorIntegrationTestBase {
         Instant lastEnd = middle.stream().map(t -> at(t, "completedAt")).max(Instant::compareTo).orElseThrow();
         assertThat(lastStart).as("all three running at once").isBefore(firstEnd);
         assertThat(at(Runs.task(execution, "e"), "startedAt")).isAfterOrEqualTo(lastEnd);
-        assertThat(Duration.between(at(execution, "createdAt"), at(execution, "completedAt")))
-            .isLessThan(Duration.ofMillis(1_400));
+        // Run time of the graph itself, from the first task starting to the last one finishing: b, c and d one after
+        // another would take at least 1.5 s. Measured from task timestamps, not from execution creation, so the time
+        // before the first dispatch (slow on a cold CI runner) doesn't count.
+        assertThat(Duration.between(at(Runs.task(execution, "a"), "startedAt"),
+            at(Runs.task(execution, "e"), "completedAt"))).isLessThan(Duration.ofMillis(1_400));
     }
 
     @Test
