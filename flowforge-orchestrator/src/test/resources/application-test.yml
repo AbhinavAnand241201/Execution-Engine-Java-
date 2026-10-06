@@ -1,0 +1,39 @@
+spring:
+  main:
+    banner-mode: off
+
+flowforge:
+  dispatch:
+    mode: local
+    poll-interval: 50ms   # tests shorten intervals
+    # Off by default: every test context shares one database, so a running loop would dispatch other tests' READY
+    # tasks. OrchestrationLoopIT turns it on in its own context (closed after the class).
+    job-enabled: false
+  jobs:
+    enabled: false   # same reason: tests that need the retry promoter / timeout sweeper turn them on in their own context
+  retry:
+    promoter-interval: 50ms
+  timeout:
+    sweep-interval: 200ms
+    grace: 200ms
+  workers:
+    heartbeat-ttl: 2s   # RecoveryIT drives the monitor by hand
+  reconciler:
+    interval: 500ms
+    stale-queued-after: 2s
+  security:
+    jwt:
+      # Test-only value (≥ 64 bytes, so tests can also sign an HS512 token with the same key) so the context can start; real environments must set FLOWFORGE_JWT_SECRET.
+      secret: "test-only-jwt-secret-do-not-use-anywhere-else-0123456789-padded-to-64b"
+    # Seeded test accounts; values exist only in this test profile.
+    admin:
+      email: admin@test.flowforge.local
+      password: test-admin-password
+    operator:
+      email: operator@test.flowforge.local
+      password: test-operator-password
+
+logging:
+  level:
+    root: WARN
+    com.flowforge: INFO

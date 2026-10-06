@@ -1,0 +1,24 @@
+{
+  "mappings": [
+    {
+      "scenarioName": "flaky",
+      "requiredScenarioState": "Started",
+      "newScenarioState": "failed-once",
+      "request": { "method": "POST", "url": "/api/flaky" },
+      "response": { "status": 503, "body": "temporarily unavailable" }
+    },
+    {
+      "scenarioName": "flaky",
+      "requiredScenarioState": "failed-once",
+      "newScenarioState": "failed-twice",
+      "request": { "method": "POST", "url": "/api/flaky" },
+      "response": { "status": 503, "body": "temporarily unavailable" }
+    },
+    {
+      "scenarioName": "flaky",
+      "requiredScenarioState": "failed-twice",
+      "request": { "method": "POST", "url": "/api/flaky" },
+      "response": { "status": 200, "headers": { "Content-Type": "application/json" }, "jsonBody": { "ok": true } }
+    }
+  ]
+}

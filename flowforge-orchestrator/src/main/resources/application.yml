@@ -1,0 +1,160 @@
+# Orchestrator defaults. Every value can be overridden by environment variable (relaxed binding,
+# e.g. SPRING_DATASOURCE_URL, FLOWFORGE_DISPATCH_MODE). Secrets have no defaults here; they come from .env.
+spring:
+  application:
+    name: flowforge-orchestrator
+  profiles:
+    default: dev
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:5432/${POSTGRES_DB:flowforge}
+    username: ${POSTGRES_USER:flowforge}
+    password: ${POSTGRES_PASSWORD:}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate  # Flyway owns the schema; Hibernate only checks it matches the entities
+  flyway:
+    enabled: true
+    # V100 (demo data) is independent of the engine tables; later engine migrations (V4, V5, ...) must still apply
+    # on databases that already ran V100.
+    out-of-order: true
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+    deserialization:
+      # Strict for request bodies. Kafka consumers get their own lenient mapper so a newer
+      # worker adding a field can't poison the result stream during a rolling deploy.
+      fail-on-unknown-properties: true
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+      timeout: 2s
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    admin:
+      # Broker auto-creation is off and the orchestrator creates the topics: without them nothing can be sent, so
+      # refuse to start (compose restarts it) instead of running with no topics.
+      fail-fast: true
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      enable-auto-commit: false
+      auto-offset-reset: earliest
+      max-poll-records: 20
+    listener:
+      ack-mode: manual
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5   # <= 5 keeps per-partition order with idempotence
+        max.block.ms: 5000          # a send must not hang the relay when the broker is down
+        request.timeout.ms: 3000
+        delivery.timeout.ms: 5000
+  mvc:
+    problemdetails:
+      enabled: false  # GlobalExceptionHandler writes the standard error format instead
+
+server:
+  error:
+    include-stacktrace: never
+    include-message: never
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-components: always
+      show-details: when-authorized   # component details for ADMIN only
+      roles: ADMIN
+      group:
+        liveness:
+          include: livenessState,ping       # "is the process alive?" never depends on the database
+        readiness:
+          include: readinessState,db        # "can it serve traffic?" does
+  info:
+    git:
+      mode: simple
+
+flowforge:
+  security:
+    jwt:
+      secret: ${FLOWFORGE_JWT_SECRET:}  # required, >= 32 bytes; startup fails without it
+      ttl: 60m
+      issuer: flowforge
+    admin:
+      email: ${FLOWFORGE_ADMIN_EMAIL:}
+      password: ${FLOWFORGE_ADMIN_PASSWORD:}
+    operator:
+      email: ${FLOWFORGE_OPERATOR_EMAIL:}
+      password: ${FLOWFORGE_OPERATOR_PASSWORD:}
+    cors:
+      allowed-origins: []
+  limits:
+    output-max-bytes: 65536
+    input-max-bytes: 65536
+    max-tasks-per-workflow: 200
+    request-max-bytes: 1048576  # any body, before parsing; env FLOWFORGE_LIMITS_REQUEST_MAX_BYTES
+  dispatch:
+    # kafka = commands go to worker processes (default); local = tasks run inside the orchestrator (orchestrator
+    # tests, single-process demos). Env FLOWFORGE_DISPATCH_MODE.
+    mode: ${FLOWFORGE_DISPATCH_MODE:kafka}
+    poll-interval: 250ms
+    batch-size: 100
+    job-enabled: true
+  local-runner:
+    max-concurrency: 8
+  jobs:
+    enabled: true        # retry promoter, timeout sweeper (and later jobs); tests turn them off
+    batch-size: 100
+  retry:
+    promoter-interval: 1s
+  timeout:
+    sweep-interval: 5s
+    grace: 10s
+  workers:
+    heartbeat-ttl: 15s
+    monitor-interval: 5s
+    queue-depth-interval: 10s
+  reconciler:
+    interval: 30s
+    stale-queued-after: 60s
+  outbox:
+    relay-interval: 100ms
+    batch-size: 100
+    send-timeout: 11s   # > max.block.ms + delivery.timeout.ms, so get() always sees the real outcome
+    retention: 7d
+    janitor-interval: 1h
+  kafka:
+    topics:
+      partitions: 6
+      replication-factor: 1
+  executors:
+    http:
+      allowed-hosts: ${FLOWFORGE_HTTP_ALLOWED_HOSTS:wiremock,localhost}  # SSRF allowlist, exact host names
+      connect-timeout: 2s
+      max-response-bytes: 16384
+    database:
+      statement-timeout: 5s
+      max-rows: 1000
+      queries:  # the only SQL DATABASE tasks can run; :name = bound parameter
+        orders_by_status: >-
+          SELECT id, customer, amount, status, created_at FROM demo.orders WHERE status = :status ORDER BY id
+        orders_between_dates: >-
+          SELECT id, customer, amount, status, created_at FROM demo.orders
+          WHERE created_at >= :from::timestamptz AND created_at < :to::timestamptz ORDER BY id
+  chaos:
+    enabled: false  # failure injection endpoints; env FLOWFORGE_CHAOS_ENABLED
+
+logging:
+  pattern:
+    level: "%5p [%X{correlationId:-}]"

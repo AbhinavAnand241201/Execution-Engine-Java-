@@ -1,0 +1,4 @@
+# LF everywhere, so generated files (docs/state-machines.md) compare byte-for-byte on every OS.
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.jar binary

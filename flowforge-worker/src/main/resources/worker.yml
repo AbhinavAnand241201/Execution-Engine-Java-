@@ -1,0 +1,87 @@
+# Worker defaults, loaded as spring.config.name=worker (see FlowForgeWorkerApplication). Every value can be overridden by environment variable (relaxed binding). Secrets have no
+# defaults here; they come from .env. The worker never migrates the schema: the orchestrator owns Flyway.
+spring:
+  application:
+    name: flowforge-worker
+  flyway:
+    enabled: false   # the orchestrator owns the schema (matters when Flyway is on the classpath, e.g. system tests)
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:5432/${POSTGRES_DB:flowforge}
+    username: ${POSTGRES_USER:flowforge}
+    password: ${POSTGRES_PASSWORD:}
+    hikari:
+      # >= task threads (max-concurrency) + consumer threads (listener-concurrency × capabilities): a claim must never
+      # wait long for a connection on the poll thread.
+      maximum-pool-size: 28
+      connection-timeout: 5000   # ms
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      enable-auto-commit: false
+      auto-offset-reset: earliest
+      max-poll-records: 20
+      properties:
+        # A dead or frozen consumer gives its partitions back after 10 s instead of 45 s, so the retried command
+        # (same key, same partition) is picked up by another worker sooner.
+        session.timeout.ms: 10000
+        heartbeat.interval.ms: 3000
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+        max.block.ms: 5000
+        request.timeout.ms: 3000
+        delivery.timeout.ms: 8000
+    listener:
+      ack-mode: manual
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+      timeout: 2s
+
+server:
+  port: ${SERVER_PORT:8081}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+flowforge:
+  worker:
+    name: ${FLOWFORGE_WORKER_NAME:${HOSTNAME:worker}}
+    capabilities: ${FLOWFORGE_WORKER_CAPABILITIES:HTTP,DELAY,DATABASE,REPORT}
+    max-concurrency: 16
+    thread-mode: PLATFORM
+    listener-concurrency: 2
+    shutdown-grace: 30s
+    heartbeat-interval: 5s
+    heartbeat-ttl: 15s
+    exit-when-declared-offline: true
+  limits:
+    output-max-bytes: 65536
+  executors:
+    http:
+      allowed-hosts: ${FLOWFORGE_HTTP_ALLOWED_HOSTS:wiremock,localhost}  # SSRF allowlist, exact host names
+      connect-timeout: 2s
+      max-response-bytes: 16384
+    database:
+      statement-timeout: 5s
+      max-rows: 1000
+      queries:  # must match the orchestrator's list: it validates, the worker runs
+        orders_by_status: >-
+          SELECT id, customer, amount, status, created_at FROM demo.orders WHERE status = :status ORDER BY id
+        orders_between_dates: >-
+          SELECT id, customer, amount, status, created_at FROM demo.orders
+          WHERE created_at >= :from::timestamptz AND created_at < :to::timestamptz ORDER BY id

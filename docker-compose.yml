@@ -1,0 +1,180 @@
+# FlowForge local stack: `docker compose up -d --build` starts everything (infrastructure, orchestrator, 3 workers);
+# `make infra` starts the infrastructure only. Image tags match flowforge-runtime's IntegrationTestBase so tests and
+# the stack use the same versions.
+# Secrets come from .env (copy .env.example); compose refuses to start without them.
+
+name: flowforge
+
+# Settings every worker service shares (merged into worker-1..3 below).
+x-worker: &worker
+  image: flowforge-worker:local
+  depends_on:
+    orchestrator: { condition: service_healthy }   # the orchestrator owns the schema and the topics
+  restart: unless-stopped
+  # > shutdown-grace (30 s) + container stops + time to report interrupted attempts: docker must not SIGKILL a
+  # worker that is still shutting down cleanly.
+  stop_grace_period: 60s
+  healthcheck:
+    test: ["CMD-SHELL", "curl -fsS http://localhost:8081/actuator/health > /dev/null"]
+    interval: 5s
+    timeout: 3s
+    retries: 30
+    start_period: 20s
+
+services:
+  postgres:
+    image: postgres:16.15-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-flowforge}
+      POSTGRES_USER: ${POSTGRES_USER:-flowforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7.4.11-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  kafka:
+    image: apache/kafka:3.9.2
+    ports:
+      - "9092:9092"
+    environment:
+      # Single-node KRaft: this node is both broker and controller.
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # INTERNAL for containers on the compose network, EXTERNAL for apps and tests on the host.
+      KAFKA_LISTENERS: INTERNAL://:19092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Topics are created by the orchestrator at startup, never implicitly.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      CLUSTER_ID: ZmxvdzAwZm9yZ2UwMDAwMA
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 15s
+
+  wiremock:
+    image: wiremock/wiremock:3.13.2
+    ports:
+      - "8089:8080"
+    volumes:
+      - ./docker/wiremock:/home/wiremock:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/__admin/health > /dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+      args:
+        MODULE: flowforge-orchestrator
+    image: flowforge-orchestrator:local
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-flowforge}
+      POSTGRES_USER: ${POSTGRES_USER:-flowforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      SPRING_DATA_REDIS_HOST: redis
+      FLOWFORGE_HTTP_ALLOWED_HOSTS: ${FLOWFORGE_HTTP_ALLOWED_HOSTS:-wiremock,localhost}
+      FLOWFORGE_JWT_SECRET: ${FLOWFORGE_JWT_SECRET:?set FLOWFORGE_JWT_SECRET in .env}
+      FLOWFORGE_ADMIN_EMAIL: ${FLOWFORGE_ADMIN_EMAIL:-}
+      FLOWFORGE_ADMIN_PASSWORD: ${FLOWFORGE_ADMIN_PASSWORD:-}
+      FLOWFORGE_OPERATOR_EMAIL: ${FLOWFORGE_OPERATOR_EMAIL:-}
+      FLOWFORGE_OPERATOR_PASSWORD: ${FLOWFORGE_OPERATOR_PASSWORD:-}
+      FLOWFORGE_DISPATCH_MODE: ${FLOWFORGE_DISPATCH_MODE:-kafka}
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/actuator/health/readiness > /dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+
+  # worker-1 builds the worker image; worker-2 and worker-3 run the same image (building it three times in parallel
+  # races on the tag) and never try to pull it from a registry.
+  worker-1:
+    <<: *worker
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+      args:
+        MODULE: flowforge-worker
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-flowforge}
+      POSTGRES_USER: ${POSTGRES_USER:-flowforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      SPRING_DATA_REDIS_HOST: redis
+      FLOWFORGE_HTTP_ALLOWED_HOSTS: ${FLOWFORGE_HTTP_ALLOWED_HOSTS:-wiremock,localhost}
+      FLOWFORGE_WORKER_NAME: worker-1
+      FLOWFORGE_WORKER_CAPABILITIES: HTTP,DELAY
+
+  worker-2:
+    <<: *worker
+    pull_policy: never
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-flowforge}
+      POSTGRES_USER: ${POSTGRES_USER:-flowforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      SPRING_DATA_REDIS_HOST: redis
+      FLOWFORGE_HTTP_ALLOWED_HOSTS: ${FLOWFORGE_HTTP_ALLOWED_HOSTS:-wiremock,localhost}
+      FLOWFORGE_WORKER_NAME: worker-2
+      FLOWFORGE_WORKER_CAPABILITIES: HTTP,DELAY,DATABASE,REPORT
+
+  worker-3:
+    <<: *worker
+    pull_policy: never
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-flowforge}
+      POSTGRES_USER: ${POSTGRES_USER:-flowforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      SPRING_DATA_REDIS_HOST: redis
+      FLOWFORGE_HTTP_ALLOWED_HOSTS: ${FLOWFORGE_HTTP_ALLOWED_HOSTS:-wiremock,localhost}
+      FLOWFORGE_WORKER_NAME: worker-3
+      FLOWFORGE_WORKER_CAPABILITIES: DELAY,REPORT
+
+volumes:
+  postgres-data:

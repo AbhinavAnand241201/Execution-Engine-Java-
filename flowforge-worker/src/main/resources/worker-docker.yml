@@ -1,0 +1,5 @@
+# Inside docker compose: JSON logs for machines.
+logging:
+  structured:
+    format:
+      console: ecs

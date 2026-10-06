@@ -1,0 +1,7 @@
+# Production: JSON logs, nothing chatty.
+logging:
+  structured:
+    format:
+      console: ecs
+  level:
+    root: INFO

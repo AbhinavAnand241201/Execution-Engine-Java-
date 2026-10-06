@@ -1,0 +1,4 @@
+# Failure-injection profile (chaos endpoints are not implemented yet).
+flowforge:
+  chaos:
+    enabled: true
